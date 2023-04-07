@@ -294,9 +294,60 @@ class TorchDevice:
         k_cache = self.allocate(shape, np.float16, pin_memory=pin_memory)
         v_cache = self.allocate(shape, np.float16, pin_memory=pin_memory)
         return k_cache, v_cache
+    
+
+
+    def Bytemha(self,n_head,hidden,attention_mask,qkv_kernel,qkv_bias,
+                attr_output_kernel, attr_output_bias,
+                attr_output_layernorm_gamma,attr_output_layernorm_beta,
+                inter_kernel,inter_bias,output_kernel,output_bias,
+                output_layernorm_gamma,output_layernorm_beta,
+                compress_cache,comp_config):
+        inputs = hidden.value
+        b, s, h = inputs.shape
+        head_dim = h // n_head
+
+        lib_path = "/user/MathsCode/projects/FlexGen/flexgen/libths_bytetransformer.so"
+        torch.ops.load_library(lib_path)
+        is_remove_padding = True
+        use_fused_attention = True
+        hidden_states = torch.ops.ByteTransformer.BertTransformer(
+                    n_head, head_dim,
+                    qkv_kernel, qkv_bias,
+                    attr_output_kernel, attr_output_bias,
+                    attr_output_layernorm_gamma, attr_output_layernorm_beta,
+                    inter_kernel, inter_bias, output_kernel, output_bias,
+                    output_layernorm_gamma, output_layernorm_beta,
+                    hidden_states, attention_mask,
+                    is_remove_padding, use_fused_attention)
+        k = torch.empty(s, b * n_head, head_dim).uniform_(-0.4, 0.4).cuda().half()
+        v = torch.empty(s, b * n_head, head_dim).uniform_(-0.4, 0.4).cuda().half()
+        if compress_cache:
+            k = self.compressed_device.compress(k, comp_config)
+            v = self.compressed_device.compress(v, comp_config)
+        else:
+            k = TorchTensor.create_from_torch(k, self)
+            v = TorchTensor.create_from_torch(v, self)
+        
+        return TorchTensor.create_from_torch(hidden_states, self),k,v
+        
+    def generate_kv(self,inputs,n_head,compress_cache, comp_config):
+        b, s, h = inputs.shape
+        head_dim = h // n_head
+        k = torch.empty(s, b * n_head, head_dim).uniform_(-0.4, 0.4).cuda().half()
+        v = torch.empty(s, b * n_head, head_dim).uniform_(-0.4, 0.4).cuda().half()
+        if compress_cache:
+            new_k_cache = self.compressed_device.compress(k, comp_config)
+            new_v_cache = self.compressed_device.compress(v, comp_config)
+        else:
+            new_k_cache = TorchTensor.create_from_torch(k, self)
+            new_v_cache = TorchTensor.create_from_torch(v, self)
+        return new_k_cache,new_v_cache
+    
 
     def mha(self, inputs, attention_mask, w_q, b_q, w_k, b_k, w_v, b_v,
-            w_out, b_out, w_ln, b_ln, n_head, donate, compress_cache, comp_config):
+            w_out, b_out, w_ln, b_ln, n_head, donate, 
+            compress_cache, comp_config):
         """Multi-head attention (prefill phase)."""
         # decompress weights
         if w_q.device.device_type == DeviceType.COMPRESSED:
@@ -347,14 +398,14 @@ class TorchDevice:
         value = F.linear(value, w_out.data, bias=b_out.data)
 
         value.add_(inputs.data)
-
+        
         if donate[0]: inputs.delete()
         if donate[1]: attention_mask.delete()
 
         # (s, b * n_head, head_dim)
         k = k.permute(2, 0, 1)
         v = v.permute(1, 0, 2)
-
+        
         if compress_cache:
             k = self.compressed_device.compress(k, comp_config)
             v = self.compressed_device.compress(v, comp_config)
@@ -363,7 +414,7 @@ class TorchDevice:
             v = TorchTensor.create_from_torch(v, self)
 
         return TorchTensor.create_from_torch(value, self), k, v
-
+        
     def mha_gen(self, inputs, attention_mask, w_q, b_q, w_k, b_k, w_v, b_v,
                 w_out, b_out, w_ln, b_ln, n_head, k_cache, v_cache, donate,
                 attn_sparsity, compress_cache, comp_config):

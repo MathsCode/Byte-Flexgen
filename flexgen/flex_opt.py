@@ -405,7 +405,10 @@ class SelfAttention:
     def store_cache(self, cache_home, cache_write_buf, i):
         # shape: (s, b * n_head, head_dim)
         k_home, v_home = cache_home.val
+        # print(cache_write_buf.pop())
+        # print(i)
         k_new, v_new = cache_write_buf.pop()
+        # cache_write_buf.store((k_new,v_new))
 
         if i == self.task.gen_len - 1:  # last token, no need to store cache
             return
@@ -443,10 +446,14 @@ class SelfAttention:
 
         if i == 0:  # prefill
             mask, donate[1] = attention_mask.val.smart_copy(self.compute)
-            h, new_k_cache, new_v_cache = self.compute.mha(h, mask, w_q, b_q,
-                w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head, donate,
-                self.policy.compress_cache, self.policy.comp_cache_config)
+            new_k_cache, new_v_cache = self.compute.generate_kv(h,n_head,
+                                                                self.policy.compress_cache, self.policy.comp_cache_config)
+            
+            # h, new_k_cache, new_v_cache = self.compute.mha(h, mask, w_q, b_q,
+            #     w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head, donate,
+            #     self.policy.compress_cache, self.policy.comp_cache_config)
             cache_write_buf.store((new_k_cache, new_v_cache))
+            return mask,w_q,b_q,w_k,b_k,w_v,b_v, w_out, b_out, w_ln, b_ln,donate
         else:  # decoding
             mask, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
             (k_cache, donate[12]), (v_cache, donate[13]) = cache_read_buf.pop()
@@ -455,7 +462,7 @@ class SelfAttention:
                 k_cache, v_cache, donate, self.policy.attn_sparsity,
                 self.policy.compress_cache, self.policy.comp_cache_config)
             cache_write_buf.store((new_k_cache, new_v_cache))
-
+            
         hidden.val = h
 
 
@@ -579,6 +586,70 @@ class TransformerLayer:
         self.mlp.forward(hidden, None, read_buf2, attention_mask, None, i, k)
 
 
+class ByteTransformerLayer():
+    def __init__(self, config, env, policy, i):
+        self.config = config
+        self.compute = env.gpu
+        self.attention = SelfAttention(config, env, policy, i)
+        self.mlp = MLP(config, env, policy, i)
+        self.policy = policy
+        self.compute = self.attention.compute
+
+    def set_task(self, task):
+        self.attention.set_task(task)
+        self.mlp.set_task(task)
+
+    def init_weight(self, weight_home, path):
+        home1, home2 = ValueHolder(), ValueHolder()
+        self.attention.init_weight(home1, path)
+        self.mlp.init_weight(home2, path)
+        weight_home.store((home1, home2))
+
+    def load_weight(self, weight_home, weight_read_buf, k):
+        read_buf1, read_buf2 = ValueHolder(), ValueHolder()
+        home1, home2 = weight_home.val
+        self.attention.load_weight(home1, read_buf1, k)
+        self.mlp.load_weight(home2, read_buf2, k)
+        if k == 0:
+            weight_read_buf.store((read_buf1, read_buf2))
+
+    def init_cache_one_gpu_batch(self, cache_home):
+        self.attention.init_cache_one_gpu_batch(cache_home)
+
+    def load_cache(self, cache_home, cache_read_buf, i):
+        self.attention.load_cache(cache_home, cache_read_buf, i)
+
+    def store_cache(self, cache_home, cache_write_buf, i):
+        self.attention.store_cache(cache_home, cache_write_buf, i)
+
+    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask,
+                cache_write_buf, i, k):
+        if k == self.policy.num_gpu_batches - 1:
+            read_buf1, read_buf2 = weight_read_buf.pop()
+        else:
+            read_buf1, read_buf2 = weight_read_buf.val
+        if i == 0:
+            mask,w_q,b_q,w_k,b_k,w_v,b_v, w_out, b_out, w_ln_in, b_ln_in,_ = self.attention.forward(hidden, cache_read_buf, read_buf1, attention_mask,
+                               cache_write_buf, i, k)
+            wi, bi, wo, bo, w_ln_out, b_ln_out,_ = self.mlp.forward(hidden, None, read_buf2, attention_mask, None, i, k)
+            
+            
+            
+            n_head = self.config.n_head
+            w_qkv = torch.cat([w_q,w_k,w_v],dim=1)
+            b_qkv = torch.cat([b_q,b_k,b_v],dim=1)
+            h,k,v= self.compute.Bytemha(n_head,hidden,mask,w_qkv,b_qkv,w_out,b_out,
+                                 w_ln_in,b_ln_in,wi,bi,wo,bo,w_ln_out,b_ln_out,
+                                 self.policy.compress_cache, self.policy.comp_cache_config)
+            cache_write_buf.store((k, v))
+            
+            hidden.value = h
+        else:
+            self.attention.forward(hidden, cache_read_buf, read_buf1, attention_mask,
+                               cache_write_buf, i, k)
+            self.mlp.forward(hidden, None, read_buf2, attention_mask, None, i, k)
+
+
 class OptLM:
     def __init__(self,
                  config: Union[str, OptConfig],
@@ -600,7 +671,7 @@ class OptLM:
                 layers.append(SelfAttention(self.config, self.env, self.policy, i))
                 layers.append(MLP(self.config, self.env, self.policy, i))
             else:
-                layers.append(TransformerLayer(self.config, self.env, self.policy, i))
+                layers.append(ByteTransformerLayer(self.config, self.env, self.policy, i))
         layers.append(OutputEmbed(self.config, self.env, self.policy))
         self.layers = layers
         self.num_layers = len(layers)

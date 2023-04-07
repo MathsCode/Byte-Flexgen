@@ -94,3 +94,4 @@ We plan to work on the following features.
 - [ ] Release the cost model and policy optimizer
 - [ ] Macbook Support (M1 and M2)
 - [ ] AMD Support
+# flexgen
