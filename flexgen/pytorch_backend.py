@@ -8,7 +8,7 @@ import shutil
 import time
 import threading
 from typing import Optional, Union, Tuple
-
+import os
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -302,48 +302,45 @@ class TorchDevice:
                 attr_output_layernorm_gamma,attr_output_layernorm_beta,
                 inter_kernel,inter_bias,output_kernel,output_bias,
                 output_layernorm_gamma,output_layernorm_beta,
-                compress_cache,comp_config):
-        inputs = hidden.value
+                compress_cache, comp_config):
+        inputs = hidden.val
         b, s, h = inputs.shape
+        print(inputs.shape)
         head_dim = h // n_head
+        print(head_dim)
+        idx = torch.arange(s, device=self.dev)
+        causal_mask = (idx <= idx.view(s, 1)).view(1, 1,s, s)
+        mask = attention_mask.data.view(b,1, 1, s) & causal_mask
+        mask = mask.half()
 
-        lib_path = "/user/MathsCode/projects/FlexGen/flexgen/libths_bytetransformer.so"
+        lib_path = "/user/MathsCode/try/test/ByteTransformer/build/lib/libths_bytetransformer.so"
         torch.ops.load_library(lib_path)
+        print("load success!")
         is_remove_padding = True
         use_fused_attention = True
-        hidden_states = torch.ops.ByteTransformer.BertTransformer(
+        output,k,v= torch.ops.ByteTransformer.BertTransformer(
                     n_head, head_dim,
                     qkv_kernel, qkv_bias,
-                    attr_output_kernel, attr_output_bias,
-                    attr_output_layernorm_gamma, attr_output_layernorm_beta,
-                    inter_kernel, inter_bias, output_kernel, output_bias,
-                    output_layernorm_gamma, output_layernorm_beta,
-                    hidden_states, attention_mask,
+                    attr_output_kernel.data.half(), attr_output_bias.data.half(),
+                    attr_output_layernorm_gamma.data.half(), attr_output_layernorm_beta.data.half(),
+                    inter_kernel.data.half(), inter_bias.data.half(), output_kernel.data.half(), output_bias.data.half(),
+                    output_layernorm_gamma.data.half(), output_layernorm_beta.data.half(),
+                    inputs.data.half(), mask,
                     is_remove_padding, use_fused_attention)
-        k = torch.empty(s, b * n_head, head_dim).uniform_(-0.4, 0.4).cuda().half()
-        v = torch.empty(s, b * n_head, head_dim).uniform_(-0.4, 0.4).cuda().half()
+        print("k.shape",k.shape)
+        print("v.shape",v.shape)
+        print("k.shape",k.shape)
+        print("v.shape",v.shape)
+        # k = k.permute(1, 2, 0)
+        # v = v.permute(1, 0, 2)
         if compress_cache:
             k = self.compressed_device.compress(k, comp_config)
             v = self.compressed_device.compress(v, comp_config)
         else:
             k = TorchTensor.create_from_torch(k, self)
             v = TorchTensor.create_from_torch(v, self)
-        
-        return TorchTensor.create_from_torch(hidden_states, self),k,v
-        
-    def generate_kv(self,inputs,n_head,compress_cache, comp_config):
-        b, s, h = inputs.shape
-        head_dim = h // n_head
-        k = torch.empty(s, b * n_head, head_dim).uniform_(-0.4, 0.4).cuda().half()
-        v = torch.empty(s, b * n_head, head_dim).uniform_(-0.4, 0.4).cuda().half()
-        if compress_cache:
-            new_k_cache = self.compressed_device.compress(k, comp_config)
-            new_v_cache = self.compressed_device.compress(v, comp_config)
-        else:
-            new_k_cache = TorchTensor.create_from_torch(k, self)
-            new_v_cache = TorchTensor.create_from_torch(v, self)
-        return new_k_cache,new_v_cache
-    
+        return TorchTensor.create_from_torch(output, self),k,v
+
 
     def mha(self, inputs, attention_mask, w_q, b_q, w_k, b_k, w_v, b_v,
             w_out, b_out, w_ln, b_ln, n_head, donate, 

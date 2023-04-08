@@ -444,15 +444,8 @@ class SelfAttention:
              (w_v, _), (b_v, _), (w_out, _), (b_out, _),
              (w_ln, _), (b_ln, _)) = weight_read_buf.val
 
-        if i == 0:  # prefill
+        if (i == 0):  # prefill
             mask, donate[1] = attention_mask.val.smart_copy(self.compute)
-            new_k_cache, new_v_cache = self.compute.generate_kv(h,n_head,
-                                                                self.policy.compress_cache, self.policy.comp_cache_config)
-            
-            # h, new_k_cache, new_v_cache = self.compute.mha(h, mask, w_q, b_q,
-            #     w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head, donate,
-            #     self.policy.compress_cache, self.policy.comp_cache_config)
-            cache_write_buf.store((new_k_cache, new_v_cache))
             return mask,w_q,b_q,w_k,b_k,w_v,b_v, w_out, b_out, w_ln, b_ln,donate
         else:  # decoding
             mask, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
@@ -535,9 +528,11 @@ class MLP:
         else:
             ((wi, _), (bi, _), (wo, _), (bo, _),
              (w_ln, _), (b_ln, _)) = weight_read_buf.val
-
-        h = self.compute.mlp(h, wi, bi, wo, bo, w_ln, b_ln, donate)
-        hidden.val = h
+        if(1):
+        #     return wi, bi, wo, bo, w_ln, b_ln, donate
+        # else:
+            h = self.compute.mlp(h, wi, bi, wo, bo, w_ln, b_ln, donate)
+            hidden.val = h
 
 
 class TransformerLayer:
@@ -593,7 +588,6 @@ class ByteTransformerLayer():
         self.attention = SelfAttention(config, env, policy, i)
         self.mlp = MLP(config, env, policy, i)
         self.policy = policy
-        self.compute = self.attention.compute
 
     def set_task(self, task):
         self.attention.set_task(task)
@@ -624,26 +618,34 @@ class ByteTransformerLayer():
 
     def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask,
                 cache_write_buf, i, k):
+        donate = [False] * 14
+        print("forward success")
         if k == self.policy.num_gpu_batches - 1:
             read_buf1, read_buf2 = weight_read_buf.pop()
+            ((w_q, donate[2]), (b_q, donate[3]), (w_k, donate[4]), (b_k, donate[5]),
+             (w_v, donate[6]), (b_v, donate[7]), (w_out, donate[8]), (b_out, donate[9]),
+             (w_ln_in, donate[10]), (b_ln_in, donate[11])) = read_buf1.pop()
+            ((wi, donate[1]), (bi, donate[2]), (wo, donate[3]), (bo, donate[4]),
+             (w_ln_out, donate[5]), (b_ln_out, donate[6])) = read_buf2.pop()
         else:
             read_buf1, read_buf2 = weight_read_buf.val
+            ((w_q, _), (b_q, _), (w_k, _), (b_k, _),
+             (w_v, _), (b_v, _), (w_out, _), (b_out, _),
+             (w_ln_in, _), (b_ln_in, _)) = read_buf1.val
+            ((wi, _), (bi, _), (wo, _), (bo, _),
+             (w_ln_out, _), (b_ln_out, _)) = read_buf2.val
+            
         if i == 0:
-            mask,w_q,b_q,w_k,b_k,w_v,b_v, w_out, b_out, w_ln_in, b_ln_in,_ = self.attention.forward(hidden, cache_read_buf, read_buf1, attention_mask,
-                               cache_write_buf, i, k)
-            wi, bi, wo, bo, w_ln_out, b_ln_out,_ = self.mlp.forward(hidden, None, read_buf2, attention_mask, None, i, k)
-            
-            
-            
+            mask, donate[1] = attention_mask.val.smart_copy(self.compute)
             n_head = self.config.n_head
-            w_qkv = torch.cat([w_q,w_k,w_v],dim=1)
-            b_qkv = torch.cat([b_q,b_k,b_v],dim=1)
-            h,k,v= self.compute.Bytemha(n_head,hidden,mask,w_qkv,b_qkv,w_out,b_out,
+            w_qkv = torch.cat([w_q.data,w_k.data,w_v.data],dim=-1).half()
+            b_qkv = torch.cat([b_q.data,b_k.data,b_v.data],dim=0).half()
+            new_h,new_k_cache,new_v_cache= self.compute.Bytemha(n_head,hidden,mask,w_qkv,b_qkv,w_out,b_out,
                                  w_ln_in,b_ln_in,wi,bi,wo,bo,w_ln_out,b_ln_out,
                                  self.policy.compress_cache, self.policy.comp_cache_config)
-            cache_write_buf.store((k, v))
-            
-            hidden.value = h
+            # print(new_k_cache,new_v_cache)
+            cache_write_buf.store((new_k_cache,new_v_cache))
+            hidden.val = new_h
         else:
             self.attention.forward(hidden, cache_read_buf, read_buf1, attention_mask,
                                cache_write_buf, i, k)
@@ -857,6 +859,7 @@ class OptLM:
         # Clear the weight_read_buf if it is the last gpu batch
         # Clear the cache_read_buf
         # Run layer computation
+        print("compute success")
         self.layers[j].forward(self.hidden[i][j][k], self.cache_read_buf[j][k],
             self.weight_read_buf[j], self.attention_mask[k],
             self.cache_write_buf[j][k], i, k)
@@ -947,7 +950,7 @@ class OptLM:
                 self.init_cache(j, k)
         if self.policy.cpu_cache_compute:
             self.env.cpu.init_attention_compute_workspace(self.config, self.task, self.policy)
-
+        
         # Generate
         if debug_mode is None:
             if not overlap:
@@ -970,7 +973,7 @@ class OptLM:
             self.generation_loop_debug_normal()
         else:
             raise ValueError("Invalid debug mode: {debug_mode}")
-
+        print("11success!")
         # Delete cache
         for j in range(num_layers):
             for k in range(num_gpu_batches):
@@ -1369,7 +1372,7 @@ def add_parser_arguments(parser):
          "the percentage of activations on GPU, "
          "the percentage of activations on CPU")
     parser.add_argument("--sep-layer", type=str2bool, nargs='?',
-        const=True, default=True)
+        const=True, default=False)
     parser.add_argument("--pin-weight", type=str2bool, nargs="?",
         const=True, default=True)
     parser.add_argument("--cpu-cache-compute", action="store_true")
