@@ -455,7 +455,7 @@ class SelfAttention:
                 k_cache, v_cache, donate, self.policy.attn_sparsity,
                 self.policy.compress_cache, self.policy.comp_cache_config)
             cache_write_buf.store((new_k_cache, new_v_cache))
-
+        
         hidden.val = h
 
 
@@ -579,6 +579,94 @@ class TransformerLayer:
         self.mlp.forward(hidden, None, read_buf2, attention_mask, None, i, k)
 
 
+class ByteTransformerLayer():
+    def __init__(self, config, env, policy, i):
+        self.config = config
+        self.compute = env.gpu
+        self.attention = SelfAttention(config, env, policy, i)
+        self.mlp = MLP(config, env, policy, i)
+        self.policy = policy
+
+    def set_task(self, task):
+        self.attention.set_task(task)
+        self.mlp.set_task(task)
+
+    def init_weight(self, weight_home, path):
+        home1, home2 = ValueHolder(), ValueHolder()
+        self.attention.init_weight(home1, path)
+        self.mlp.init_weight(home2, path)
+        weight_home.store((home1, home2))
+
+    def load_weight(self, weight_home, weight_read_buf, k):
+        read_buf1, read_buf2 = ValueHolder(), ValueHolder()
+        home1, home2 = weight_home.val
+        self.attention.load_weight(home1, read_buf1, k)
+        self.mlp.load_weight(home2, read_buf2, k)
+        if k == 0:
+            weight_read_buf.store((read_buf1, read_buf2))
+
+    def init_cache_one_gpu_batch(self, cache_home):
+        self.attention.init_cache_one_gpu_batch(cache_home)
+
+    def load_cache(self, cache_home, cache_read_buf, i):
+        self.attention.load_cache(cache_home, cache_read_buf, i)
+
+    def store_cache(self, cache_home, cache_write_buf, i):
+        self.attention.store_cache(cache_home, cache_write_buf, i)
+
+    def Byte_get_param(self,hidden,read_buf1,read_buf2,attention_mask,k):
+        donate = [False] * 14
+        h, donate[0] = hidden.val, True
+        if k == self.policy.num_gpu_batches - 1:
+            # attention param
+            ((w_q, donate[2]), (b_q, donate[3]), (w_k, donate[4]), (b_k, donate[5]),
+            (w_v, donate[6]), (b_v, donate[7]), (w_out, donate[8]), (b_out, donate[9]),
+            (w_ln_in, donate[10]), (b_ln_in, donate[11])) = read_buf1.pop()
+            # mlp param
+            ((wi, donate[1]), (bi, donate[2]), (wo, donate[3]), (bo, donate[4]),
+            (w_ln_out, donate[5]), (b_ln_out, donate[6])) = read_buf2.pop()
+        else:
+            ((w_q, _), (b_q, _), (w_k, _), (b_k, _),
+            (w_v, _), (b_v, _), (w_out, _), (b_out, _),
+            (w_ln_in, _), (b_ln_in, _)) = read_buf1.val
+            ((wi, _), (bi, _), (wo, _), (bo, _),
+            (w_ln_out, _), (b_ln_out, _)) = read_buf2.val
+        mask, donate[1] = attention_mask.val.smart_copy(self.compute)
+        print("Get ByteParam Success!")
+        return h,w_q,w_k,w_v,b_q,b_k,b_v,w_out,b_out,w_ln_in,w_ln_out,b_ln_in,b_ln_out,wi,wo,bi,bo,mask,donate
+    
+
+    def forward(self, hidden, cache_read_buf, weight_read_buf, attention_mask,
+                cache_write_buf, i, k):
+        
+        # print("Get in ByteForward Success!")
+        if k == self.policy.num_gpu_batches - 1:
+            read_buf1, read_buf2 = weight_read_buf.pop()
+        else:
+            read_buf1, read_buf2 = weight_read_buf.val
+            
+        if i == 0:
+            h,w_q,w_k,w_v,b_q,b_k,b_v,w_out,b_out,w_ln_in,w_ln_out,b_ln_in,b_ln_out,wi,wo,bi,bo,mask,donate = self.Byte_get_param(hidden,read_buf1,read_buf2,attention_mask,k)
+            n_head = self.config.n_head
+            new_h,new_k_cache,new_v_cache= self.compute.Bytemha(h,mask,w_q,b_q,w_k,b_k,w_v,b_v,w_out,b_out,
+                                 w_ln_in,b_ln_in,wi,bi,wo,bo,w_ln_out,b_ln_out,n_head,donate,
+                                 self.policy.compress_cache, self.policy.comp_cache_config)
+            print("new_h",new_h.shape)
+            print(new_h.data)
+            
+            print("new_k_cache",new_k_cache.shape)
+            print(new_k_cache.data)
+            print("new_v_cache",new_v_cache.shape)
+            print(new_v_cache.data)
+            
+            cache_write_buf.store((new_k_cache,new_v_cache))
+            # print("Store K V Success!")
+            hidden.val = new_h
+        else:
+            self.attention.forward(hidden, cache_read_buf, read_buf1, attention_mask,
+                               cache_write_buf, i, k)
+            self.mlp.forward(hidden, None, read_buf2, attention_mask, None, i, k)
+
 class OptLM:
     def __init__(self,
                  config: Union[str, OptConfig],
@@ -600,7 +688,7 @@ class OptLM:
                 layers.append(SelfAttention(self.config, self.env, self.policy, i))
                 layers.append(MLP(self.config, self.env, self.policy, i))
             else:
-                layers.append(TransformerLayer(self.config, self.env, self.policy, i))
+                layers.append(ByteTransformerLayer(self.config, self.env, self.policy, i))
         layers.append(OutputEmbed(self.config, self.env, self.policy))
         self.layers = layers
         self.num_layers = len(layers)
@@ -1298,7 +1386,7 @@ def add_parser_arguments(parser):
          "the percentage of activations on GPU, "
          "the percentage of activations on CPU")
     parser.add_argument("--sep-layer", type=str2bool, nargs='?',
-        const=True, default=True)
+        const=True, default=False)
     parser.add_argument("--pin-weight", type=str2bool, nargs="?",
         const=True, default=True)
     parser.add_argument("--cpu-cache-compute", action="store_true")

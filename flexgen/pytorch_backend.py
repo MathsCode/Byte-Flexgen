@@ -75,6 +75,7 @@ class TorchTensor:
     name_count = count()
 
     def __init__(self, shape, dtype, data, device, name=None):
+        
         if isinstance(data, torch.Tensor):
             assert data.device == device.dev
 
@@ -295,6 +296,92 @@ class TorchDevice:
         v_cache = self.allocate(shape, np.float16, pin_memory=pin_memory)
         return k_cache, v_cache
 
+    def Bytemha(self,inputs,attention_mask,w_q,b_q,w_k,b_k,w_v,b_v,
+            w_out, b_out,
+            w_ln_in,b_ln_in,
+            w_i,b_i,w_o,b_o,
+            w_ln_out,b_ln_out,n_head,donate,
+            compress_cache, comp_config):
+        # print("Get in Bytemha Success!")
+        if w_q.device.device_type == DeviceType.COMPRESSED:
+            w_q = w_q.device.decompress(w_q)
+            w_k = w_k.device.decompress(w_k)
+            w_v = w_v.device.decompress(w_v)
+            w_out = w_out.device.decompress(w_out)
+        if w_i.device.device_type == DeviceType.COMPRESSED:
+            w_i = w_i.device.decompress(w_i)
+            w_o = w_o.device.decompress(w_o)
+
+
+        b, s, h = inputs.shape
+        head_dim = h // n_head
+        w_qkv = torch.cat([w_q.data.T,w_k.data.T,w_v.data.T],dim=-1).cuda()
+        b_qkv = torch.cat([b_q.data,b_k.data,b_v.data],dim=0).cuda()
+        # print("w_qkv",w_qkv.shape)
+        # print(w_qkv)
+        # print("b_qkv",b_qkv.shape)
+        # print(b_qkv)
+        idx = torch.arange(s, device=self.dev)
+        causal_mask = (idx <= idx.view(s, 1)).view(1, s, s)
+        mask = attention_mask.data.view(b, 1, s) & causal_mask
+        mask = mask.half()
+        lib_path = "/home/xujiaming/xujiaming/projects/test/ByteTransformer/build/lib/libths_bytetransformer.so"
+        torch.ops.load_library(lib_path)
+        print("load success!")
+        is_remove_padding = False
+        use_fused_attention = False
+        # print(inputs.data)
+        hidden = F.layer_norm(inputs.data, (h,), weight=w_ln_in.data, bias=b_ln_in.data)
+        print("input",hidden.shape)
+        print(hidden)
+        # print(w_qkv)
+        # print(w_qkv.shape)
+        # print(b_qkv)
+        # print(n_head)
+        # print(head_dim)
+        # print(w_out.shape)
+        # print(b_out.shape)
+        # print()
+        w_out_cache = w_out.data.T.contiguous()
+        w_i_cache = w_i.data.T.contiguous()
+        w_o_cache = w_o.data.T.contiguous()
+        output,output_immediate= torch.ops.ByteTransformer.BertTransformer(
+                    n_head, head_dim,
+                    w_qkv, b_qkv,
+                    w_out_cache, b_out.data,
+                    w_ln_out.data, b_ln_out.data,
+                    w_i_cache, b_i.data, w_o_cache, b_o.data,
+                    w_ln_out.data, b_ln_out.data,
+                    hidden, mask,
+                    is_remove_padding, use_fused_attention)
+        new_qkv = output_immediate.reshape(b,s,h*3)
+        # result = output_immediate.reshape(b,s,h)
+        # print(result)
+        # print("new_qkv",new_qkv.shape)
+        # print(new_qkv)
+        q,k,v = torch.chunk(new_qkv,3,-1)
+        k = k.view(b, s, n_head, head_dim)
+        v = v.view(b, s, n_head, head_dim)
+        # shape: (b * n_head, head_dim, s)
+        k = k.permute(0, 2, 3, 1).reshape(b * n_head, head_dim, s)
+        # shape: (b * n_head, s, head_dim)
+        v = v.permute(0, 2, 1, 3).reshape(b * n_head, s, head_dim)
+        k = k.permute(2, 0, 1)
+        v = v.permute(1, 0, 2)
+        # print(k.shape,v.shape)
+        # print(k,v)
+
+
+        if donate[0]: inputs.delete()
+        if donate[1]: attention_mask.delete()
+        if compress_cache:
+            k = self.compressed_device.compress(k, comp_config)
+            v = self.compressed_device.compress(v, comp_config)
+        else:
+            k = TorchTensor.create_from_torch(k, self)
+            v = TorchTensor.create_from_torch(v, self)
+        return TorchTensor.create_from_torch(output, self),k,v
+
     def mha(self, inputs, attention_mask, w_q, b_q, w_k, b_k, w_v, b_v,
             w_out, b_out, w_ln, b_ln, n_head, donate, compress_cache, comp_config):
         """Multi-head attention (prefill phase)."""
@@ -310,6 +397,8 @@ class TorchDevice:
         scaling = head_dim ** -0.5
 
         hidden = F.layer_norm(inputs.data, (h,), weight=w_ln.data, bias=b_ln.data)
+        print("hidden",hidden.shape)
+        print(hidden)
 
         # shape: (b, s, h)
         q = F.linear(hidden, w_q.data, bias=b_q.data) * scaling
