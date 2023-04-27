@@ -13,7 +13,7 @@ from transformers import AutoTokenizer
 from flexgen.compression import CompressionConfig
 from flexgen.dist_utils import initialize_distributed
 from flexgen.flex_opt import (Policy, InputEmbed, OutputEmbed, SelfAttention,
-                              MLP, TransformerLayer, OptLM, get_filename,
+                              MLP, TransformerLayer,ByteTransformerLayer,OptLM, get_filename,
                               add_parser_arguments, get_test_inputs,
                               DUMMY_WEIGHT)
 from flexgen.opt_config import get_opt_config
@@ -61,7 +61,7 @@ class DistOptLM(OptLM):
                 layers.append(SelfAttention(self.config, self.env, self.policy, i))
                 layers.append(MLP(self.config, self.env, self.policy, i))
             else:
-                layers.append(TransformerLayer(self.config, self.env, self.policy, i))
+                layers.append(ByteTransformerLayer(self.config, self.env, self.policy, i))
         if pipeline_rank == num_pipeline_stages - 1:
             layers.append(OutputEmbed(self.config, self.env, self.policy))
         self.layers = layers

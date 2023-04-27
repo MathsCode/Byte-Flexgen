@@ -32,7 +32,7 @@ case $MODE in
         --model facebook/opt-6.7b \
         --path $OPT_PATH \
         --offload-dir $OFFLOAD_DIR \
-        --prompt-len 512 --gen-len 32 --gpu-batch-size 1 --num-gpu-batches 1 --percent 100 0 100 0  100 0 
+        --prompt-len 1204 --gen-len 32 --gpu-batch-size 1 --num-gpu-batches 1 --percent 100 0 100 0  100 0 
         ;;
     esac
 

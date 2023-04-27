@@ -405,7 +405,10 @@ class SelfAttention:
     def store_cache(self, cache_home, cache_write_buf, i):
         # shape: (s, b * n_head, head_dim)
         k_home, v_home = cache_home.val
+        # print(cache_write_buf.pop())
+        # print(i)
         k_new, v_new = cache_write_buf.pop()
+        # cache_write_buf.store((k_new,v_new))
 
         if i == self.task.gen_len - 1:  # last token, no need to store cache
             return
@@ -441,12 +444,9 @@ class SelfAttention:
              (w_v, _), (b_v, _), (w_out, _), (b_out, _),
              (w_ln, _), (b_ln, _)) = weight_read_buf.val
 
-        if i == 0:  # prefill
+        if (i == 0):  # prefill
             mask, donate[1] = attention_mask.val.smart_copy(self.compute)
-            h, new_k_cache, new_v_cache = self.compute.mha(h, mask, w_q, b_q,
-                w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head, donate,
-                self.policy.compress_cache, self.policy.comp_cache_config)
-            cache_write_buf.store((new_k_cache, new_v_cache))
+            return mask,w_q,b_q,w_k,b_k,w_v,b_v, w_out, b_out, w_ln, b_ln,donate
         else:  # decoding
             mask, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
             (k_cache, donate[12]), (v_cache, donate[13]) = cache_read_buf.pop()
@@ -528,9 +528,11 @@ class MLP:
         else:
             ((wi, _), (bi, _), (wo, _), (bo, _),
              (w_ln, _), (b_ln, _)) = weight_read_buf.val
-
-        h = self.compute.mlp(h, wi, bi, wo, bo, w_ln, b_ln, donate)
-        hidden.val = h
+        if(1):
+        #     return wi, bi, wo, bo, w_ln, b_ln, donate
+        # else:
+            h = self.compute.mlp(h, wi, bi, wo, bo, w_ln, b_ln, donate)
+            hidden.val = h
 
 
 class TransformerLayer:
@@ -632,7 +634,6 @@ class ByteTransformerLayer():
             ((wi, _), (bi, _), (wo, _), (bo, _),
             (w_ln_out, _), (b_ln_out, _)) = read_buf2.val
         mask, donate[1] = attention_mask.val.smart_copy(self.compute)
-        print("Get ByteParam Success!")
         return h,w_q,w_k,w_v,b_q,b_k,b_v,w_out,b_out,w_ln_in,w_ln_out,b_ln_in,b_ln_out,wi,wo,bi,bo,mask,donate
     
 
@@ -651,16 +652,7 @@ class ByteTransformerLayer():
             new_h,new_k_cache,new_v_cache= self.compute.Bytemha(h,mask,w_q,b_q,w_k,b_k,w_v,b_v,w_out,b_out,
                                  w_ln_in,b_ln_in,wi,bi,wo,bo,w_ln_out,b_ln_out,n_head,donate,
                                  self.policy.compress_cache, self.policy.comp_cache_config)
-            print("new_h",new_h.shape)
-            print(new_h.data)
-            
-            print("new_k_cache",new_k_cache.shape)
-            print(new_k_cache.data)
-            print("new_v_cache",new_v_cache.shape)
-            print(new_v_cache.data)
-            
             cache_write_buf.store((new_k_cache,new_v_cache))
-            # print("Store K V Success!")
             hidden.val = new_h
         else:
             self.attention.forward(hidden, cache_read_buf, read_buf1, attention_mask,
@@ -964,7 +956,7 @@ class OptLM:
                 self.init_cache(j, k)
         if self.policy.cpu_cache_compute:
             self.env.cpu.init_attention_compute_workspace(self.config, self.task, self.policy)
-
+        
         # Generate
         if debug_mode is None:
             if not overlap:
@@ -987,7 +979,6 @@ class OptLM:
             self.generation_loop_debug_normal()
         else:
             raise ValueError("Invalid debug mode: {debug_mode}")
-
         # Delete cache
         for j in range(num_layers):
             for k in range(num_gpu_batches):
@@ -1258,7 +1249,8 @@ def get_filename(args):
 
 
 def get_test_inputs(prompt_len, num_prompts, tokenizer):
-    prompts = ["Paris is the capital city of"]
+    # prompts = ["The United States of America (U.S.A. or USA), commonly known as the United States (U.S. or US) or America, is a country primarily located in North America. It consists of 50 states, a federal district, five major unincorporated territories, nine Minor Outlying Islands,and 326 Indian reservations. The United States is the world's third-largest country by both land and total area. It shares land borders with Canada to its north and with Mexico to its south and has maritime borders with the Bahamas, Cuba, Russia, and other nations. With a population of over 333 million,it is the most populous country in the Americas and the third most populous in the world. The national capital of the United States is Washington, D.C. and its most populous city and principal financial center is New York City."]
+    prompts = ["Paris, city and capital of France, situated in the north-central part of the country. People were living on the site of the present-day city"]
     input_ids = tokenizer(prompts, padding="max_length",
                           max_length=prompt_len).input_ids
     return (input_ids[0],) * num_prompts
