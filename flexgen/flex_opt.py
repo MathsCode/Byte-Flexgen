@@ -1308,6 +1308,7 @@ def run_flexgen(args):
     if BYTETRANSFORMER:
         print("Loading Library...")
         lib_path = "/home/nfs_data/zhanggh/BytetransformerX/build/lib/libths_bytetransformer.so"
+        #lib_path = "/home/nfs_data/zhanggh/bytetransformer/build/lib/libths_bytetransformer.so"
         torch.ops.load_library(lib_path)
     model = OptLM(opt_config, env, args.path, policy)
 

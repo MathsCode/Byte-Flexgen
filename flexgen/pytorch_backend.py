@@ -20,8 +20,8 @@ from flexgen.utils import (GB, T, cpu_mem_stats, vector_gather,
 general_copy_compressed = TorchCompressedDevice = None
 global_cpu_device = None
 global_disk_device = None
-#BYTETRANSFORMER = True
-BYTETRANSFORMER = False
+BYTETRANSFORMER = True
+#BYTETRANSFORMER = False
 
 def fix_recursive_import():
     global general_copy_compressed, TorchCompressedDevice, global_cpu_device
@@ -339,6 +339,7 @@ class TorchDevice:
                     hidden, inputs.data,mask,
                     is_remove_padding, use_fused_attention)
         """
+        """
         output,output_immediate= torch.ops.ByteTransformer.BertTransformer(
                     n_head, head_dim,
                     w_qkv, b_qkv,
@@ -348,16 +349,37 @@ class TorchDevice:
                     w_ln_out.data, b_ln_out.data,
                     hidden, inputs.data, mask,
                     is_remove_padding, use_fused_attention)
-                
         new_qkv = output_immediate.reshape(b,s,h*3)
         _,k,v = torch.chunk(new_qkv,3,-1)
-
+        """
+        """
+        output,k,v= torch.ops.ByteTransformer.BertTransformer(
+                    n_head, head_dim,
+                    w_qkv, b_qkv,
+                    w_out.data, b_out.data,
+                    w_ln_out.data, b_ln_out.data,
+                    w_i.data, b_i.data, w_o.data, b_o.data,
+                    w_ln_out.data, b_ln_out.data,
+                    hidden, inputs.data, mask,
+                    is_remove_padding, use_fused_attention)        
         k = k.view(b, s, n_head, head_dim)
         v = v.view(b, s, n_head, head_dim)
         # shape: (b * n_head, head_dim, s)
         k = k.permute(1, 0, 2, 3).reshape(s, b * n_head, head_dim)
         # shape: (b * n_head, s, head_dim)
         v = v.permute(1, 0, 2, 3).reshape(s, b * n_head, head_dim)
+        """
+        output,k,v= torch.ops.ByteTransformer.BertTransformer(
+                    n_head, head_dim,
+                    w_qkv, b_qkv,
+                    w_out.data, b_out.data,
+                    w_ln_out.data, b_ln_out.data,
+                    w_i.data, b_i.data, w_o.data, b_o.data,
+                    w_ln_out.data, b_ln_out.data,
+                    hidden, inputs.data, mask,
+                    is_remove_padding, use_fused_attention)        
+        k = k.view(s, b * n_head, head_dim)
+        v = v.view(s, b * n_head, head_dim)
 
         if donate[0]: inputs.delete()
         if donate[1]: attention_mask.delete()
