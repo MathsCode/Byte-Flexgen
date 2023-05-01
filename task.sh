@@ -1,9 +1,9 @@
 MODEL=$1
 MODE=$2
-OPT_PATH=/home/xujiaming/xujiaming/data/Flexgen_data/opt_weights_np
-OFFLOAD_DIR=/home/xujiaming/xujiaming/data/Flexgen_data/Offload
-export TRANSFORMERS_CACHE=/home/xujiaming/xujiaming/data/Flexgen_data/.cache
-export HF_HOME=/home/xujiaming/xujiaming/data/Flexgen_data/.cache/huggingface
+OPT_PATH=/home/eva_share/user_file/zhanggh/opt_weights_np
+OFFLOAD_DIR=/home/eva_share/user_file/zhanggh/flexgen_offload_dir
+export TRANSFORMERS_CACHE=/home/eva_share/user_file/zhanggh/.cache
+export HF_HOME=/home/eva_share/user_file/zhanggh/.cache/huggingface
 
 case $MODE in 
 
@@ -32,7 +32,7 @@ case $MODE in
         --model facebook/opt-6.7b \
         --path $OPT_PATH \
         --offload-dir $OFFLOAD_DIR \
-        --prompt-len 1204 --gen-len 32 --gpu-batch-size 1 --num-gpu-batches 1 --percent 100 0 100 0  100 0 
+        --prompt-len 1024 --gen-len 32 --gpu-batch-size 1 --num-gpu-batches 1 --percent 100 0 100 0 100 0 \
         ;;
     esac
 

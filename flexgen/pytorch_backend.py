@@ -20,7 +20,8 @@ from flexgen.utils import (GB, T, cpu_mem_stats, vector_gather,
 general_copy_compressed = TorchCompressedDevice = None
 global_cpu_device = None
 global_disk_device = None
-
+BYTETRANSFORMER = True
+#BYTETRANSFORMER = False
 
 def fix_recursive_import():
     global general_copy_compressed, TorchCompressedDevice, global_cpu_device
@@ -315,24 +316,19 @@ class TorchDevice:
 
         b, s, h = inputs.shape
         head_dim = h // n_head
-        w_qkv = torch.cat([w_q.data.T,w_k.data.T,w_v.data.T],dim=-1).cuda()
+        #w_qkv = torch.cat([w_q.data.T,w_k.data.T,w_v.data.T],dim=-1).cuda()
+        w_qkv = torch.cat([w_q.data,w_k.data,w_v.data],dim=-1).cuda()
         b_qkv = torch.cat([b_q.data,b_k.data,b_v.data],dim=0).cuda()
         
         idx = torch.arange(s, device=self.dev)
         causal_mask = (idx <= idx.view(s, 1)).view(1, s, s)
         mask = attention_mask.data.view(b, 1, s) & causal_mask
         mask = mask.half()
-
-
-
-
-        lib_path = "/home/xujiaming/xujiaming/projects/test/ByteTransformer/build/lib/libths_bytetransformer.so"
-        torch.ops.load_library(lib_path)
         is_remove_padding = False
         use_fused_attention = False
         hidden = F.layer_norm(inputs.data, (h,), weight=w_ln_in.data, bias=b_ln_in.data)
 
-
+        """
         output,output_immediate= torch.ops.ByteTransformer.BertTransformer(
                     n_head, head_dim,
                     w_qkv, b_qkv,
@@ -342,18 +338,48 @@ class TorchDevice:
                     w_ln_out.data, b_ln_out.data,
                     hidden, inputs.data,mask,
                     is_remove_padding, use_fused_attention)
+        """
+        """
+        output,output_immediate= torch.ops.ByteTransformer.BertTransformer(
+                    n_head, head_dim,
+                    w_qkv, b_qkv,
+                    w_out.data, b_out.data,
+                    w_ln_out.data, b_ln_out.data,
+                    w_i.data, b_i.data, w_o.data, b_o.data,
+                    w_ln_out.data, b_ln_out.data,
+                    hidden, inputs.data, mask,
+                    is_remove_padding, use_fused_attention)
         new_qkv = output_immediate.reshape(b,s,h*3)
-        q,k,v = torch.chunk(new_qkv,3,-1)
-
-
+        _,k,v = torch.chunk(new_qkv,3,-1)
+        """
+        """
+        output,k,v= torch.ops.ByteTransformer.BertTransformer(
+                    n_head, head_dim,
+                    w_qkv, b_qkv,
+                    w_out.data, b_out.data,
+                    w_ln_out.data, b_ln_out.data,
+                    w_i.data, b_i.data, w_o.data, b_o.data,
+                    w_ln_out.data, b_ln_out.data,
+                    hidden, inputs.data, mask,
+                    is_remove_padding, use_fused_attention)        
         k = k.view(b, s, n_head, head_dim)
         v = v.view(b, s, n_head, head_dim)
         # shape: (b * n_head, head_dim, s)
-        k = k.permute(0, 2, 3, 1).reshape(b * n_head, head_dim, s)
+        k = k.permute(1, 0, 2, 3).reshape(s, b * n_head, head_dim)
         # shape: (b * n_head, s, head_dim)
-        v = v.permute(0, 2, 1, 3).reshape(b * n_head, s, head_dim)
-        k = k.permute(2, 0, 1)
-        v = v.permute(1, 0, 2)
+        v = v.permute(1, 0, 2, 3).reshape(s, b * n_head, head_dim)
+        """
+        output,k,v= torch.ops.ByteTransformer.BertTransformer(
+                    n_head, head_dim,
+                    w_qkv, b_qkv,
+                    w_out.data, b_out.data,
+                    w_ln_out.data, b_ln_out.data,
+                    w_i.data, b_i.data, w_o.data, b_o.data,
+                    w_ln_out.data, b_ln_out.data,
+                    hidden, inputs.data, mask,
+                    is_remove_padding, use_fused_attention)        
+        k = k.view(s, b * n_head, head_dim)
+        v = v.view(s, b * n_head, head_dim)
 
         if donate[0]: inputs.delete()
         if donate[1]: attention_mask.delete()
@@ -454,9 +480,14 @@ class TorchDevice:
         hidden = F.layer_norm(inputs.data, (h,), weight=w_ln.data, bias=b_ln.data)
 
         # shape: (b, 1, h)
-        q = F.linear(hidden, w_q.data, bias=b_q.data) * scaling
-        k = F.linear(hidden, w_k.data, bias=b_k.data)
-        v = F.linear(hidden, w_v.data, bias=b_v.data)
+        if BYTETRANSFORMER:
+            q = (torch.matmul(hidden, w_q.data).add_(b_q.data)) * scaling
+            k = torch.matmul(hidden, w_k.data).add_(b_k.data)
+            v = torch.matmul(hidden, w_v.data).add(b_v.data)
+        else:
+            q = F.linear(hidden, w_q.data, bias=b_q.data) * scaling
+            k = F.linear(hidden, w_k.data, bias=b_k.data)
+            v = F.linear(hidden, w_v.data, bias=b_v.data)
         # shape: (b, 1, n_head, head_dim)
         q = q.view(b, tgt_s, n_head, head_dim)
         k = k.view(b, tgt_s, n_head, head_dim)
@@ -519,7 +550,10 @@ class TorchDevice:
 
         # shape: (b, 1, h)
         value = value.transpose(1, 2).view(b, tgt_s, h)
-        value = F.linear(value, w_out.data, bias=b_out.data)
+        if BYTETRANSFORMER:
+            value = torch.matmul(value, w_out.data).add_(b_out.data)
+        else:
+            value = F.linear(value, w_out.data, bias=b_out.data)
 
         value.add_(inputs.data)
 
@@ -646,9 +680,16 @@ class TorchDevice:
         b, s, h = inputs.shape
 
         out = F.layer_norm(inputs.data, (h,), weight=w_ln.data, bias=b_ln.data)
-        out = F.linear(out, wi.data, bias=bi.data)
-        F.relu(out, inplace=True)
-        out = F.linear(out, wo.data, bias=bo.data)
+        
+        if BYTETRANSFORMER:
+            out = torch.matmul(out, wi.data).add_(bi.data)
+            F.relu(out, inplace=True)
+            out = torch.matmul(out, wo.data).add_(bo.data)
+        else:
+            out = F.linear(out, wi.data, bias=bi.data)
+            F.relu(out, inplace=True)
+            out = F.linear(out, wo.data, bias=bo.data)
+
 
         out.add_(inputs.data)
         if donate[0]: inputs.delete()

@@ -18,7 +18,7 @@ from transformers import AutoTokenizer
 from flexgen.compression import CompressionConfig
 from flexgen.opt_config import OptConfig, get_opt_config, download_opt_weights
 from flexgen.pytorch_backend import (TorchDevice, TorchDisk, TorchLink,
-    TorchMixedDevice, DeviceType, general_copy, fix_recursive_import)
+    TorchMixedDevice, DeviceType, general_copy, fix_recursive_import, BYTETRANSFORMER)
 from flexgen.timer import timers
 from flexgen.utils import (Task, ExecutionEnv, GB, T, ValueHolder,
     array_1d, array_2d, array_3d, str2bool, project_decode_latency,
@@ -28,7 +28,6 @@ from flexgen.utils import (Task, ExecutionEnv, GB, T, ValueHolder,
 fix_recursive_import()
 
 DUMMY_WEIGHT = "_DUMMY_"  # Use dummy weights for benchmark purposes
-
 
 @dataclasses.dataclass(frozen=True)
 class Policy:
@@ -108,14 +107,19 @@ def init_weight_list(weight_specs, policy, env):
             pin_memory = policy.pin_weight
             compress = policy.compress_weight
 
+        do_trans = BYTETRANSFORMER and "weight" in filename and "embed" not in filename and len(shape) == 2
+
         if not compress:
             weight = home.allocate(shape, dtype, pin_memory=pin_memory)
 
             if DUMMY_WEIGHT not in filename:
                 weight.load_from_np_file(weight_specs[i][2])
             else:
-                weight.load_from_np(np.ones(shape, dtype))
-                #weight.load_from_np(np.random.rand(*shape).astype(dtype))
+                #weight.load_from_np(np.ones(shape, dtype))
+                weight.load_from_np(np.random.rand(*shape).astype(dtype))
+
+            if do_trans:
+                weight.data = weight.data.T.contiguous()
         else:
             weight = home.compressed_device.allocate(
                 shape, dtype, policy.comp_weight_config, pin_memory=pin_memory)
@@ -444,9 +448,12 @@ class SelfAttention:
              (w_v, _), (b_v, _), (w_out, _), (b_out, _),
              (w_ln, _), (b_ln, _)) = weight_read_buf.val
 
-        if (i == 0):  # prefill
+        if i == 0:  # prefill
             mask, donate[1] = attention_mask.val.smart_copy(self.compute)
-            return mask,w_q,b_q,w_k,b_k,w_v,b_v, w_out, b_out, w_ln, b_ln,donate
+            h, new_k_cache, new_v_cache = self.compute.mha(h, mask, w_q, b_q,
+                w_k, b_k, w_v, b_v, w_out, b_out, w_ln, b_ln, n_head, donate,
+                self.policy.compress_cache, self.policy.comp_cache_config)
+            cache_write_buf.store((new_k_cache, new_v_cache))
         else:  # decoding
             mask, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
             (k_cache, donate[12]), (v_cache, donate[13]) = cache_read_buf.pop()
@@ -528,11 +535,9 @@ class MLP:
         else:
             ((wi, _), (bi, _), (wo, _), (bo, _),
              (w_ln, _), (b_ln, _)) = weight_read_buf.val
-        if(1):
-        #     return wi, bi, wo, bo, w_ln, b_ln, donate
-        # else:
-            h = self.compute.mlp(h, wi, bi, wo, bo, w_ln, b_ln, donate)
-            hidden.val = h
+
+        h = self.compute.mlp(h, wi, bi, wo, bo, w_ln, b_ln, donate)
+        hidden.val = h
 
 
 class TransformerLayer:
@@ -680,7 +685,10 @@ class OptLM:
                 layers.append(SelfAttention(self.config, self.env, self.policy, i))
                 layers.append(MLP(self.config, self.env, self.policy, i))
             else:
-                layers.append(ByteTransformerLayer(self.config, self.env, self.policy, i))
+                if BYTETRANSFORMER:
+                    layers.append(ByteTransformerLayer(self.config, self.env, self.policy, i))
+                else:
+                    layers.append(TransformerLayer(self.config, self.env, self.policy, i))
         layers.append(OutputEmbed(self.config, self.env, self.policy))
         self.layers = layers
         self.num_layers = len(layers)
@@ -1250,7 +1258,8 @@ def get_filename(args):
 
 def get_test_inputs(prompt_len, num_prompts, tokenizer):
     # prompts = ["The United States of America (U.S.A. or USA), commonly known as the United States (U.S. or US) or America, is a country primarily located in North America. It consists of 50 states, a federal district, five major unincorporated territories, nine Minor Outlying Islands,and 326 Indian reservations. The United States is the world's third-largest country by both land and total area. It shares land borders with Canada to its north and with Mexico to its south and has maritime borders with the Bahamas, Cuba, Russia, and other nations. With a population of over 333 million,it is the most populous country in the Americas and the third most populous in the world. The national capital of the United States is Washington, D.C. and its most populous city and principal financial center is New York City."]
-    prompts = ["Paris, city and capital of France, situated in the north-central part of the country. People were living on the site of the present-day city"]
+    prompts = ["Paris is the capital and most populous city of France, with an official estimated population of 2,102,650 residents as of 1 January 2023 making it the fourth-most populated city in the European Union as well as the 30th most densely populated city in the world in 2022. Since the 17th century, Paris has been one of the world's major centres of finance, diplomacy, commerce, fashion, gastronomy, and science. For its leading role in the arts and sciences, as well as its early and extensive system of street lighting, in the 19th century, it became known as the City of Light. Like London, prior to the Second World War, it was also sometimes called the capital of the world. The City of Paris is the centre of the region, or Paris Region, with an official estimated population of 12.271.794 habitants on January 1, 2023, or about 19 percent of the population of France, the region France's primate city. The Paris Region had a GDP of 739 billion in 2019, the highest in Europe. According to the Economist Intelligence Unit Worldwide Cost of Living Survey, in 2022, Paris was the city with the ninth-highest cost of living in the world. Paris is a major railway, highway, and air-transport hub served by two international airports: Charles de Gaulle Airport (the second-busiest airport in Europe) and Orly Airport. Opened in 1900, the city's subway system, the Paris Métro, serves 5.23 million passengers daily; it is the second-busiest metro system in Europe after the Moscow Metro. Gare du Nord is the 24th-busiest railway station in the world and the busiest outside Japan, with 262 million passengers in 2015. Paris is especially known for its museums and architectural landmarks: the Louvre received 7.8 million visitors in 2022, keeping its position as the most-visited art museum in the world. The Musée d'Orsay, Musée Marmottan Monet and Musée de l'Orangerie are noted for their collections of French Impressionist art. The Pompidou Centre Musée National d'Art Moderne has the largest collection of modern and contemporary art in Europe and Musée Rodin and Musée Picasso. The historical district along the Seine in the city centre has been classified as a UNESCO World Heritage Site since 1991; popular landmarks there include the Cathedral of Notre Dame de Paris on the Île de la Cité, now closed for renovation after the 15 April 2019 fire. Other popular tourist sites include the Gothic royal chapel of Sainte-Chapelle, also on the Île de la Cité; the Eiffel Tower, constructed for the Paris Universal Exposition of 1889; the Grand Palais and Petit Palais, built for the Paris Universal Exposition of 1900; the Arc de Triomphe on the Champs-Élysées, and the hill of Montmartre with its artistic history and its Basilica of Sacré-Coeur."]
+    # prompts = ["Paris, city and capital of France, situated in the north-central part of the country. People were living on the site of the present-day city"]
     input_ids = tokenizer(prompts, padding="max_length",
                           max_length=prompt_len).input_ids
     return (input_ids[0],) * num_prompts
@@ -1296,6 +1305,11 @@ def run_flexgen(args):
           f"hidden size (prefill): {hidden_size/GB:.3f} GB")
 
     print("init weight...")
+    if BYTETRANSFORMER:
+        print("Loading Library...")
+        lib_path = "/home/nfs_data/zhanggh/BytetransformerX/build/lib/libths_bytetransformer.so"
+        #lib_path = "/home/nfs_data/zhanggh/bytetransformer/build/lib/libths_bytetransformer.so"
+        torch.ops.load_library(lib_path)
     model = OptLM(opt_config, env, args.path, policy)
 
     try:
@@ -1335,6 +1349,10 @@ def run_flexgen(args):
         if args.verbose >= 2:
             print(show_str)
 
+    if BYTETRANSFORMER:
+        print("Use ByteTransformer")
+    else:
+        print("Use FlexGen")
     gpu.print_stats()
     cpu.print_stats()
     projected = bool(args.debug_mode or cut_gen_len)
